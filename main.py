@@ -1,0 +1,122 @@
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+from PIL import Image, ImageDraw, ImageFont
+import io
+import shutil
+import os
+from models import Base, SessionLocal, ImageData, engine
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+app = FastAPI()
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: str, text_position: tuple, text_color: tuple, font_path: str, font_size: int) -> Image.Image:
+    try:
+        # Resize logo if it's larger than the image
+        if logo.size[0] > image.size[0] or logo.size[1] > image.size[1]:
+            logo = logo.resize((image.size[0] // 4, image.size[1] // 4), Image.LANCZOS)
+
+        # Paste the logo onto the original image
+        image.paste(logo, position, logo)
+
+        # Initialize ImageDraw
+        draw = ImageDraw.Draw(image)
+
+        # Load a font
+        if font_path and os.path.exists(font_path):
+            font = ImageFont.truetype(font_path, font_size)
+        else:
+            font = ImageFont.load_default()
+
+        # Reshape and bidi the Arabic text
+        reshaped_text = arabic_reshaper.reshape(text)
+        bidi_text = get_display(reshaped_text)
+
+        # Add text to the image
+        draw.text(text_position, bidi_text, fill=text_color, font=font)
+
+        return image
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing the image: {e}")
+
+@app.post("/process_image/")
+async def process_image(
+    image: UploadFile = File(...),
+    logo: UploadFile = File(...),
+    text: str = Form(...),
+    position_x: int = Form(0),
+    position_y: int = Form(0),
+    text_position_x: int = Form(100),
+    text_position_y: int = Form(100),
+    text_color: str = Form("255,255,255"),
+    font_size: int = Form(30),
+    font_path: str = Form(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Save the uploaded files
+        image_path = f"images/{image.filename}"
+        logo_path = f"logos/{logo.filename}"
+        os.makedirs(os.path.dirname(image_path), exist_ok=True)
+        os.makedirs(os.path.dirname(logo_path), exist_ok=True)
+
+        with open(image_path, "wb") as img_f:
+            shutil.copyfileobj(image.file, img_f)
+        with open(logo_path, "wb") as logo_f:
+            shutil.copyfileobj(logo.file, logo_f)
+
+        # Load the images
+        image = Image.open(image_path)
+        logo = Image.open(logo_path)
+
+        # Convert text_color to tuple
+        text_color = tuple(map(int, text_color.split(',')))
+
+        # Process the image
+        processed_image = add_logo_and_text(
+            image,
+            logo,
+            (position_x, position_y),
+            text,
+            (text_position_x, text_position_y),
+            text_color,
+            font_path,
+            font_size
+        )
+
+        # Save the processed image
+        processed_image_path = "processed_image.png"
+        processed_image.save(processed_image_path)
+
+        # Save the metadata to the database
+        db_image = ImageData(
+            image_path=image_path,
+            logo_path=logo_path,
+            text=text,
+            text_position_x=text_position_x,
+            text_position_y=text_position_y,
+            text_color=str(text_color),
+            font_size=font_size,
+            font_path=font_path,
+            logo_position_x=position_x,
+            logo_position_y=position_y
+        )
+        db.add(db_image)
+        db.commit()
+
+        return FileResponse(processed_image_path, media_type="image/png", filename="output_image.png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing the request: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
