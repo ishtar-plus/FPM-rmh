@@ -8,6 +8,9 @@ import os
 from models import Base, SessionLocal, ImageData, engine
 import arabic_reshaper
 from bidi.algorithm import get_display
+from typing import List
+import re
+import textwrap
 
 app = FastAPI()
 
@@ -19,7 +22,10 @@ def get_db():
     finally:
         db.close()
 
-def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: str, text_position: tuple, text_color: tuple, font_path: str, font_size: int) -> Image.Image:
+def sanitize_filename(filename: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+
+def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: str, text_zone: tuple, text_color: tuple, font_path: str, font_size: int) -> Image.Image:
     try:
         # Resize logo if it's larger than the image
         if logo.size[0] > image.size[0] or logo.size[1] > image.size[1]:
@@ -41,8 +47,22 @@ def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, te
         reshaped_text = arabic_reshaper.reshape(text)
         bidi_text = get_display(reshaped_text)
 
-        # Add text to the image
-        draw.text(text_position, bidi_text, fill=text_color, font=font)
+        # Calculate text wrapping to fit within the text zone
+        text_x, text_y, zone_width, zone_height = text_zone
+        max_width = zone_width
+        wrapped_text = ""
+        for line in bidi_text.split('\n'):
+            wrapped_text += "\n".join(textwrap.wrap(line, width=max_width, expand_tabs=False, replace_whitespace=False))
+
+        # Draw text within the text zone
+        current_y = text_y
+        for line in wrapped_text.split('\n'):
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_height = bbox[3] - bbox[1]
+            if current_y + line_height > text_y + zone_height:
+                break  # Stop drawing if text exceeds the text zone height
+            draw.text((text_x, current_y), line, fill=text_color, font=font)
+            current_y += line_height  # Move down by the height of the text line
 
         return image
     except Exception as e:
@@ -50,70 +70,82 @@ def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, te
 
 @app.post("/process_image/")
 async def process_image(
-    image: UploadFile = File(...),
+    images: List[UploadFile] = File(...),
     logo: UploadFile = File(...),
     text: str = Form(...),
     position_x: int = Form(0),
     position_y: int = Form(0),
-    text_position_x: int = Form(100),
-    text_position_y: int = Form(100),
+    text_x: int = Form(100),
+    text_y: int = Form(100),
+    text_zone_width: int = Form(300),
+    text_zone_height: int = Form(100),
     text_color: str = Form("255,255,255"),
     font_size: int = Form(30),
     font_path: str = Form(None),
     db: Session = Depends(get_db)
 ):
     try:
-        # Save the uploaded files
-        image_path = f"images/{image.filename}"
-        logo_path = f"logos/{logo.filename}"
-        os.makedirs(os.path.dirname(image_path), exist_ok=True)
+        processed_images_paths = []
+
+        # Save the uploaded logo file
+        logo_path = f"logos/{sanitize_filename(logo.filename)}"
         os.makedirs(os.path.dirname(logo_path), exist_ok=True)
 
-        with open(image_path, "wb") as img_f:
-            shutil.copyfileobj(image.file, img_f)
         with open(logo_path, "wb") as logo_f:
             shutil.copyfileobj(logo.file, logo_f)
 
-        # Load the images
-        image = Image.open(image_path)
+        # Load the logo image
         logo = Image.open(logo_path)
 
         # Convert text_color to tuple
         text_color = tuple(map(int, text_color.split(',')))
 
-        # Process the image
-        processed_image = add_logo_and_text(
-            image,
-            logo,
-            (position_x, position_y),
-            text,
-            (text_position_x, text_position_y),
-            text_color,
-            font_path,
-            font_size
-        )
+        for image in images:
+            # Save each uploaded image file
+            image_path = f"images/{sanitize_filename(image.filename)}"
+            os.makedirs(os.path.dirname(image_path), exist_ok=True)
 
-        # Save the processed image
-        processed_image_path = "processed_image.png"
-        processed_image.save(processed_image_path)
+            with open(image_path, "wb") as img_f:
+                shutil.copyfileobj(image.file, img_f)
 
-        # Save the metadata to the database
-        db_image = ImageData(
-            image_path=image_path,
-            logo_path=logo_path,
-            text=text,
-            text_position_x=text_position_x,
-            text_position_y=text_position_y,
-            text_color=str(text_color),
-            font_size=font_size,
-            font_path=font_path,
-            logo_position_x=position_x,
-            logo_position_y=position_y
-        )
-        db.add(db_image)
-        db.commit()
+            # Load the image
+            image = Image.open(image_path)
 
-        return FileResponse(processed_image_path, media_type="image/png", filename="output_image.png")
+            # Process the image
+            processed_image = add_logo_and_text(
+                image,
+                logo,
+                (position_x, position_y),
+                text,
+                (text_x, text_y, text_zone_width, text_zone_height),
+                text_color,
+                font_path,
+                font_size
+            )
+
+            # Save the processed image
+            processed_image_path = f"processed_images/processed_{sanitize_filename(image.filename)}"
+            os.makedirs(os.path.dirname(processed_image_path), exist_ok=True)
+            processed_image.save(processed_image_path)
+            processed_images_paths.append(processed_image_path)
+
+            # Save the metadata to the database
+            db_image = ImageData(
+                image_path=image_path,
+                logo_path=logo_path,
+                text=text,
+                text_position_x=text_x,
+                text_position_y=text_y,
+                text_color=str(text_color),
+                font_size=font_size,
+                font_path=font_path,
+                logo_position_x=position_x,
+                logo_position_y=position_y
+            )
+            db.add(db_image)
+            db.commit()
+
+        return [FileResponse(path, media_type="image/png", filename=os.path.basename(path)) for path in processed_images_paths]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing the request: {e}")
 
