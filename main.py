@@ -27,10 +27,6 @@ def sanitize_filename(filename: str) -> str:
 
 def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: Optional[str], text_zone: tuple, text_color: tuple, font_path: str, font_size: int, alignment: str) -> Image.Image:
     try:
-        # Resize logo if it's larger than the image
-        if logo.size[0] > image.size[0] or logo.size[1] > image.size[1]:
-            logo = logo.resize((image.size[0] // 4, image.size[1] // 4), Image.LANCZOS)
-
         # Paste the logo onto the original image
         image.paste(logo, position, logo)
 
@@ -93,6 +89,10 @@ async def process_image(
     font_size: int = Form(30),
     font_path: str = Form(None),
     alignment: str = Form("left"),
+    image_width: Optional[int] = Form(None),
+    image_height: Optional[int] = Form(None),
+    logo_width: Optional[int] = Form(None),
+    logo_height: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
     try:
@@ -108,19 +108,27 @@ async def process_image(
         # Load the logo image
         logo = Image.open(logo_path)
 
+        # Resize the logo if dimensions are provided
+        if logo_width and logo_height:
+            logo = logo.resize((logo_width, logo_height), Image.LANCZOS)
+
         # Convert text_color to tuple
         text_color = tuple(map(int, text_color.split(',')))
 
-        for image in images:
+        for image_file in images:
             # Save each uploaded image file
-            image_path = f"images/{sanitize_filename(image.filename)}"
+            image_path = f"images/{sanitize_filename(image_file.filename)}"
             os.makedirs(os.path.dirname(image_path), exist_ok=True)
 
             with open(image_path, "wb") as img_f:
-                shutil.copyfileobj(image.file, img_f)
+                shutil.copyfileobj(image_file.file, img_f)
 
             # Load the image
             image = Image.open(image_path)
+
+            # Resize the image if dimensions are provided
+            if image_width and image_height:
+                image = image.resize((image_width, image_height), Image.LANCZOS)
 
             # Process the image
             processed_image = add_logo_and_text(
@@ -136,7 +144,7 @@ async def process_image(
             )
 
             # Save the processed image
-            processed_image_path = f"processed_images/processed_{sanitize_filename(image.filename)}"
+            processed_image_path = f"processed_images/processed_{sanitize_filename(image_file.filename)}"
             os.makedirs(os.path.dirname(processed_image_path), exist_ok=True)
             processed_image.save(processed_image_path)
             processed_images_paths.append(processed_image_path)
@@ -164,5 +172,3 @@ async def process_image(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-# wkuejdbqueb
-    # wkuejdbqueb# wkuejdbqueb
