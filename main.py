@@ -8,7 +8,7 @@ import os
 from models import Base, SessionLocal, ImageData, engine
 import arabic_reshaper
 from bidi.algorithm import get_display
-from typing import List
+from typing import List, Optional
 import re
 import textwrap
 
@@ -25,7 +25,7 @@ def get_db():
 def sanitize_filename(filename: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
 
-def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: str, text_zone: tuple, text_color: tuple, font_path: str, font_size: int) -> Image.Image:
+def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: Optional[str], text_zone: tuple, text_color: tuple, font_path: str, font_size: int, alignment: str) -> Image.Image:
     try:
         # Resize logo if it's larger than the image
         if logo.size[0] > image.size[0] or logo.size[1] > image.size[1]:
@@ -34,35 +34,45 @@ def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, te
         # Paste the logo onto the original image
         image.paste(logo, position, logo)
 
-        # Initialize ImageDraw
-        draw = ImageDraw.Draw(image)
+        if text:
+            # Initialize ImageDraw
+            draw = ImageDraw.Draw(image)
 
-        # Load a font
-        if font_path and os.path.exists(font_path):
-            font = ImageFont.truetype(font_path, font_size)
-        else:
-            font = ImageFont.load_default()
+            # Load a font
+            if font_path and os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
 
-        # Reshape and bidi the Arabic text
-        reshaped_text = arabic_reshaper.reshape(text)
-        bidi_text = get_display(reshaped_text)
+            # Reshape and bidi the Arabic text
+            reshaped_text = arabic_reshaper.reshape(text)
+            bidi_text = get_display(reshaped_text)
 
-        # Calculate text wrapping to fit within the text zone
-        text_x, text_y, zone_width, zone_height = text_zone
-        max_width = zone_width
-        wrapped_text = ""
-        for line in bidi_text.split('\n'):
-            wrapped_text += "\n".join(textwrap.wrap(line, width=max_width, expand_tabs=False, replace_whitespace=False))
+            # Calculate text wrapping to fit within the text zone
+            text_x, text_y, zone_width, zone_height = text_zone
+            wrapped_text = ""
+            for line in bidi_text.split('\n'):
+                wrapped_text += "\n".join(textwrap.wrap(line, width=zone_width, expand_tabs=False, replace_whitespace=False)) + "\n"
 
-        # Draw text within the text zone
-        current_y = text_y
-        for line in wrapped_text.split('\n'):
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_height = bbox[3] - bbox[1]
-            if current_y + line_height > text_y + zone_height:
-                break  # Stop drawing if text exceeds the text zone height
-            draw.text((text_x, current_y), line, fill=text_color, font=font)
-            current_y += line_height  # Move down by the height of the text line
+            # Draw text within the text zone
+            current_y = text_y
+            for line in wrapped_text.split('\n'):
+                if not line.strip():
+                    continue
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
+                if current_y + line_height > text_y + zone_height:
+                    break  # Stop drawing if text exceeds the text zone height
+
+                if alignment == "right":
+                    draw.text((text_x + zone_width - line_width, current_y), line, fill=text_color, font=font)
+                elif alignment == "center":
+                    draw.text((text_x + (zone_width - line_width) // 2, current_y), line, fill=text_color, font=font)
+                else:  # Default to left alignment
+                    draw.text((text_x, current_y), line, fill=text_color, font=font)
+
+                current_y += line_height  # Move down by the height of the text line
 
         return image
     except Exception as e:
@@ -72,7 +82,7 @@ def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, te
 async def process_image(
     images: List[UploadFile] = File(...),
     logo: UploadFile = File(...),
-    text: str = Form(...),
+    text: Optional[str] = Form(None),
     position_x: int = Form(0),
     position_y: int = Form(0),
     text_x: int = Form(100),
@@ -82,6 +92,7 @@ async def process_image(
     text_color: str = Form("255,255,255"),
     font_size: int = Form(30),
     font_path: str = Form(None),
+    alignment: str = Form("left"),
     db: Session = Depends(get_db)
 ):
     try:
@@ -120,7 +131,8 @@ async def process_image(
                 (text_x, text_y, text_zone_width, text_zone_height),
                 text_color,
                 font_path,
-                font_size
+                font_size,
+                alignment
             )
 
             # Save the processed image
@@ -133,7 +145,7 @@ async def process_image(
             db_image = ImageData(
                 image_path=image_path,
                 logo_path=logo_path,
-                text=text,
+                text=text if text else "",
                 text_position_x=text_x,
                 text_position_y=text_y,
                 text_color=str(text_color),
