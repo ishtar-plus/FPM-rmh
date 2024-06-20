@@ -25,8 +25,33 @@ def get_db():
 def sanitize_filename(filename: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
 
+def reshape_text(text: str) -> str:
+    reshaped_text = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped_text)
+    return bidi_text
+
+def wrap_text(text: str, draw: ImageDraw.Draw, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+    lines = []
+    words = text.split(' ')
+    line = ''
+    for word in words:
+        test_line = f'{line} {word}'.strip()
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            line = test_line
+        else:
+            lines.append(line)
+            line = word
+    lines.append(line)
+    return lines
+
 def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, text: Optional[str], text_zone: tuple, text_color: tuple, font_path: str, font_size: int, alignment: str) -> Image.Image:
     try:
+        # Resize logo if it's larger than the image
+        if logo.size[0] > image.size[0] or logo.size[1] > image.size[1]:
+            logo = logo.resize((image.size[0] // 4, image.size[1] // 4), Image.LANCZOS)
+
         # Paste the logo onto the original image
         image.paste(logo, position, logo)
 
@@ -41,20 +66,15 @@ def add_logo_and_text(image: Image.Image, logo: Image.Image, position: tuple, te
                 font = ImageFont.load_default()
 
             # Reshape and bidi the Arabic text
-            reshaped_text = arabic_reshaper.reshape(text)
-            bidi_text = get_display(reshaped_text)
+            reshaped_text = reshape_text(text)
 
             # Calculate text wrapping to fit within the text zone
             text_x, text_y, zone_width, zone_height = text_zone
-            wrapped_text = ""
-            for line in bidi_text.split('\n'):
-                wrapped_text += "\n".join(textwrap.wrap(line, width=zone_width, expand_tabs=False, replace_whitespace=False)) + "\n"
+            lines = wrap_text(reshaped_text, draw, font, zone_width)
 
             # Draw text within the text zone
             current_y = text_y
-            for line in wrapped_text.split('\n'):
-                if not line.strip():
-                    continue
+            for line in lines:
                 bbox = draw.textbbox((0, 0), line, font=font)
                 line_width = bbox[2] - bbox[0]
                 line_height = bbox[3] - bbox[1]
@@ -79,20 +99,20 @@ async def process_image(
     images: List[UploadFile] = File(...),
     logo: UploadFile = File(...),
     text: Optional[str] = Form(None),
-    position_x: int = Form(0),
-    position_y: int = Form(0),
+    position_x: int = Form(-130),
+    position_y: int = Form(-180),
     text_x: int = Form(100),
-    text_y: int = Form(100),
-    text_zone_width: int = Form(300),
-    text_zone_height: int = Form(100),
+    text_y: int = Form(1140),
+    text_zone_width: int = Form(800),
+    text_zone_height: int = Form(150),
     text_color: str = Form("255,255,255"),
-    font_size: int = Form(30),
-    font_path: str = Form(None),
+    font_size: int = Form(60),
+    font_path: str = Form("/System/Library/Fonts/Supplemental/Futura.ttc"),
     alignment: str = Form("left"),
-    image_width: Optional[int] = Form(None),
-    image_height: Optional[int] = Form(None),
-    logo_width: Optional[int] = Form(None),
-    logo_height: Optional[int] = Form(None),
+    image_width: Optional[int] = Form(1500),
+    image_height: Optional[int] = Form(1500),
+    logo_width: Optional[int] = Form(600),
+    logo_height: Optional[int] = Form(600),
     db: Session = Depends(get_db)
 ):
     try:
