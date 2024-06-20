@@ -1,10 +1,13 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, File, UploadFile, Form, HTTPException, Depends
+from fastapi.responses import JSONResponse, FileResponse
 from sqlalchemy.orm import Session
-from PIL import Image, ImageDraw, ImageFont
-import io
-import shutil
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+import logging
+from pydantic import BaseModel
 import os
+import shutil
+from PIL import Image, ImageDraw, ImageFont
 from models import Base, SessionLocal, ImageData, engine
 import arabic_reshaper
 from bidi.algorithm import get_display
@@ -12,6 +15,11 @@ from typing import List, Optional
 import re
 import textwrap
 
+
+# Define your Telegram Bot token here
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+
+# Initialize FastAPI app
 app = FastAPI()
 
 # Dependency to get DB session
@@ -103,7 +111,7 @@ async def process_image(
     position_y: int = Form(-180),
     text_x: int = Form(100),
     text_y: int = Form(1140),
-    text_zone_width: int = Form(800),
+    text_zone_width: int = Form(40),
     text_zone_height: int = Form(150),
     text_color: str = Form("255,255,255"),
     font_size: int = Form(60),
@@ -189,6 +197,98 @@ async def process_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing the request: {e}")
 
+# Telegram webhook endpoint
+class TelegramWebhook(BaseModel):
+    update_id: int
+    message: dict
+
+@app.post("/telegram_webhook/")
+async def telegram_webhook(request: Request):
+    update = Update.de_json(await request.json(), bot)
+    await application.update_queue.put(update)
+    return JSONResponse(content={"status": "ok"})
+
+# Telegram command handlers
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text('Welcome to the image processing bot! Send an image to get started.')
+
+async def help(update: Update, context: CallbackContext):
+    await update.message.reply_text('Send an image and I will process it for you.')
+
+async def process_telegram_image(update: Update, context: CallbackContext):
+    if update.message.photo:
+        # Get the file from Telegram
+        file_id = update.message.photo[-1].file_id
+        new_file = await bot.get_file(file_id)
+        image_path = f'temp/{file_id}.jpg'
+        await new_file.download_to_drive(image_path)
+
+        await update.message.reply_text('Processing your image...')
+
+        # Process the image
+        try:
+            # Define the logo file and parameters
+            logo_path = '/path/to/your/logo.png'
+            with open(logo_path, "rb") as logo_file:
+                logo_upload = UploadFile(filename=logo_path, file=logo_file)
+
+                # Call the FastAPI process_image endpoint
+                response = await process_image(
+                    images=[UploadFile(filename=image_path, file=open(image_path, "rb"))],
+                    logo=logo_upload,
+                    text="",
+                    position_x=-130,
+                    position_y=-180,
+                    text_x=100,
+                    text_y=1140,
+                    text_zone_width=40,
+                    text_zone_height=150,
+                    text_color="255,255,255",
+                    font_size=60,
+                    font_path="/System/Library/Fonts/Supplemental/Futura.ttc",
+                    alignment="left",
+                    image_width=1500,
+                    image_height=1500,
+                    logo_width=600,
+                    logo_height=600,
+                    db=next(get_db())
+                )
+
+                # Save the processed image
+                processed_image_path = 'temp/processed_image.jpg'
+                with open(processed_image_path, 'wb') as f:
+                    shutil.copyfileobj(response[0].file, f)
+
+                # Send the processed image back to the user
+                with open(processed_image_path, 'rb') as f:
+                    await bot.send_photo(chat_id=update.message.chat_id, photo=f)
+
+                # Clean up temporary files
+                os.remove(image_path)
+                os.remove(processed_image_path)
+
+        except Exception as e:
+            await update.message.reply_text(f"Failed to process image: {e}")
+    else:
+        await update.message.reply_text('Please send an image!')
+
+# Create the application and add handlers
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler('start', start))
+application.add_handler(CommandHandler('help', help))
+application.add_handler(MessageHandler(filters.PHOTO, process_telegram_image))
+
 if __name__ == "__main__":
     import uvicorn
+    import os
+
+    # Ensure temp directory exists
+    os.makedirs('temp', exist_ok=True)
+
+    # Set the webhook
+    ngrok_url = "YOUR_NGROK_URL"  # Use ngrok to expose your local server
+    bot.set_webhook(f"{ngrok_url}/telegram_webhook/")
+
+    # Run the FastAPI app
     uvicorn.run(app, host="0.0.0.0", port=8000)
