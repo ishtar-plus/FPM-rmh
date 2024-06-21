@@ -13,14 +13,23 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from typing import List, Optional
 import re
-import textwrap
-
+import json
+from fastapi.middleware.cors import CORSMiddleware
 
 # Define your Telegram Bot token here
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+BOT_TOKEN = "7443260171:AAFXp0eDwbNjKxSMcAhwbHjOtYtCUGRCcrY"
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Allow CORS for all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Dependency to get DB session
 def get_db():
@@ -204,9 +213,23 @@ class TelegramWebhook(BaseModel):
 
 @app.post("/telegram_webhook/")
 async def telegram_webhook(request: Request):
-    update = Update.de_json(await request.json(), bot)
-    await application.update_queue.put(update)
-    return JSONResponse(content={"status": "ok"})
+    try:
+        # Log the received JSON data for debugging
+        body = await request.body()
+        print("Received webhook data:", body)
+
+        if not body:
+            raise ValueError("Received empty request body")
+
+        json_data = json.loads(body)
+        print("Parsed JSON data:", json.dumps(json_data, indent=4))
+
+        update = Update.de_json(json_data, Bot(BOT_TOKEN))
+        await application.update_queue.put(update)
+        return JSONResponse(content={"status": "ok"})
+    except Exception as e:
+        print(f"Error processing webhook: {e}")
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 # Telegram command handlers
 async def start(update: Update, context: CallbackContext):
@@ -272,12 +295,20 @@ async def process_telegram_image(update: Update, context: CallbackContext):
     else:
         await update.message.reply_text('Please send an image!')
 
-# Create the application and add handlers
-application = Application.builder().token(BOT_TOKEN).build()
+def start_telegram_bot():
+    global application
+    application = Application.builder().token(BOT_TOKEN).build()
 
-application.add_handler(CommandHandler('start', start))
-application.add_handler(CommandHandler('help', help))
-application.add_handler(MessageHandler(filters.PHOTO, process_telegram_image))
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help))
+    application.add_handler(MessageHandler(filters.PHOTO, process_telegram_image))
+
+    # Set the webhook
+    ngrok_url = "https://993b-78-183-104-4.ngrok-free.app"  # Use ngrok to expose your local server
+    bot = Bot(token=BOT_TOKEN)
+    bot.set_webhook(f"{ngrok_url}/telegram_webhook/")
+
+    application.run_polling()
 
 if __name__ == "__main__":
     import uvicorn
@@ -286,9 +317,5 @@ if __name__ == "__main__":
     # Ensure temp directory exists
     os.makedirs('temp', exist_ok=True)
 
-    # Set the webhook
-    ngrok_url = "YOUR_NGROK_URL"  # Use ngrok to expose your local server
-    bot.set_webhook(f"{ngrok_url}/telegram_webhook/")
-
     # Run the FastAPI app
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=9000)
